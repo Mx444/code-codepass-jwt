@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Login</title>
+    <link rel="stylesheet" href="./css/auth.css" />
+  </head>
+  <body>
+    <div class="container">
+      <h2>Login</h2>
+      <form id="loginForm">
+        <div class="form-control">
+          <label for="username">Username</label>
+          <input type="text" id="username" name="username" required />
+        </div>
+        <div class="form-control">
+          <label for="password">Password</label>
+          <input type="password" id="password" name="password" required />
+        </div>
+        <button type="submit">Login</button>
+      </form>
+
+      <div id="masterPasswordForm" style="display: none">
+        <h2>Master Password</h2>
+        <form id="masterPasswordLoginForm">
+          <div class="form-control">
+            <label for="masterPassword">Master Password</label>
+            <input type="password" id="masterPassword" name="masterPassword" required />
+          </div>
+          <button type="submit">Enter Vault</button>
+        </form>
+      </div>
+
+      <p>Don't have an account yet? <a href="signup.html">Signup here</a></p>
+    </div>
+
+    <script src="./js/login.js"></script>
+  </body>
+</html>

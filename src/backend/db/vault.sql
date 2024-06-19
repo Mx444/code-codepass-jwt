@@ -1,0 +1,11 @@
+CREATE TABLE Vault (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    service_name VARCHAR(100) NOT NULL,
+    username VARCHAR(50) NOT NULL,
+    encrypted_password TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(id) ON DELETE CASCADE,
+    UNIQUE KEY (user_id, service_name)
+);
