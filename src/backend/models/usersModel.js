@@ -1,21 +1,43 @@
 "use strict";
-const db = require("./database");
+
+const Database = require("../db/database.js");
+const Transaction = require("../db/transactionManager.js");
+const TokenModel = require("./tokenModel.js");
 const bcrypt = require("bcrypt");
+const envBcrypt = require("../config/bcrypt.js");
 const validator = require("validator");
-const { v4: uuidv4 } = require("uuid");
+const ErrorHandler = require("../utils/errorHandler.js");
 
 class User {
-  #pool;
+  #databaseIstance;
+  #transactionIstance;
+  #token;
   constructor() {
-    this.#pool = new db();
+    this.#databaseIstance = new Database();
+    this.#transactionIstance = new Transaction();
+    this.#token = new TokenModel(this.#databaseIstance, this.#transactionIstance);
   }
 
   async signup(username, email, password, master) {
     try {
       const error = [];
 
-      if (!validator.isAlphanumeric(username)) {
-        error.push("The username must be alphanumeric.");
+      if (!validator.isLength(username, { min: 3, max: 15 })) {
+        error.push("The username must be between 3 and 15 characters long.");
+      }
+      const regex = /^[a-zA-Z]+$/;
+      if (!regex.test(username)) {
+        error.push("The username must contain only letters.");
+      }
+      if (username !== username.toLowerCase()) {
+        error.push("The username must be in lowercase.");
+      }
+      if (username.includes(" ")) {
+        error.push("The username must not contain spaces.");
+      }
+      const reservedUsernames = ["admin", "user", "superuser", "root"];
+      if (reservedUsernames.includes(username.toLowerCase())) {
+        error.push("The username you have chosen is reserved or not allowed.");
       }
       if (!validator.isEmail(email)) {
         error.push("The email address is not valid.");
@@ -27,14 +49,16 @@ class User {
         error.push("The master password does not meet complexity requirements.");
       }
 
-      await this.#pool.beginTransaction();
-
-      const existingUsername = await this.#pool.read("users", { username: username });
+      await this.#transactionIstance.beginTransaction();
+      const tableUsers = "users";
+      const conditionUsername = { username: username };
+      const existingUsername = await this.#databaseIstance.read(tableUsers, conditionUsername);
       if (existingUsername.length > 0) {
         error.push("This username is already in use.");
       }
 
-      const existingEmail = await this.#pool.read("users", { email: email });
+      const conditionEmail = { email: email };
+      const existingEmail = await this.#databaseIstance.read(tableUsers, conditionEmail);
       if (existingEmail.length > 0) {
         error.push("This email address is already in use.");
       }
@@ -43,31 +67,28 @@ class User {
         const errorMessage = error.join(", ");
         throw new Error(errorMessage);
       }
-      const salt = 10;
-      const passwordHash = await bcrypt.hash(password, salt);
-      const masterdHash = await bcrypt.hash(master, salt);
+
+      const passwordHash = await bcrypt.hash(password, parseInt(envBcrypt.salt.salt1));
+      const masterdHash = await bcrypt.hash(master, parseInt(envBcrypt.salt.salt2));
 
       const userData = {
         username: username,
         email: email,
         password_hash: passwordHash,
       };
-
-      const { insertId } = await this.#pool.create("users", userData);
+      const { insertId } = await this.#databaseIstance.create(tableUsers, userData);
 
       const userMaster = {
         user_id: insertId,
         master_password_hash: masterdHash,
       };
-
-      await this.#pool.create("masterpassword", userMaster);
-
-      await this.#pool.commit();
+      await this.#databaseIstance.create("masterpassword", userMaster);
+      await this.#transactionIstance.commit();
 
       return { userId: insertId, username: username, email: email };
     } catch (error) {
-      await this.#pool.rollback();
-      this.#pool.errorAndLogger("Error during SIGNUP operation:", error);
+      await this.#transactionIstance.rollback();
+      ErrorHandler.handle("Error during SIGNUP operation:", error);
     }
   }
 
@@ -76,27 +97,36 @@ class User {
       const user = await this.#findByUsername(username);
       await this.#matchPassword(password, user.password_hash);
 
-      return { userId: user.id, username: user.username, email: user.email };
+      const tokenFound = await this.#token.findActiveTokens(user);
+      if (!tokenFound) {
+        const newToken = await this.#token.generateAndStoreToken(user);
+        this.#transactionIstance.commit();
+        return newToken;
+      }
+
+      this.#transactionIstance.commit();
+      return { token: tokenFound };
     } catch (error) {
-      this.#pool.errorAndLogger("Error during LOGIN USERNAME PASSWORD operation:", error);
+      await this.#transactionIstance.rollback();
+      ErrorHandler.handle("Error during LOGIN USERNAME PASSWORD operation:", error);
     }
   }
 
+  //! DA SISTEMARE
   async loginMaster(id, master) {
     try {
       const masterLogin = await this.#findByMaster(id);
       await this.#matchPassword(master, masterLogin.master_password_hash);
 
-      await this.#pool.beginTransaction();
-      const findUser = await this.#pool.read("users", { id: id });
+      await this.#transactionIstance.beginTransaction();
+      const findUser = await this.#databaseIstance.read("users", { id: id });
       const user = findUser[0];
-      await this.#pool.commit();
+      await this.#transactionIstance.commit();
 
       return { userId: masterLogin.user_id, username: user.username, email: user.email };
     } catch (error) {
-      await this.#pool.rollback();
-      this.#pool.errorAndLogger("Error during LOGIN MASTER operation:", error);
-      throw error;
+      await this.#transactionIstance.rollback();
+      ErrorHandler.handle("Error during LOGIN MASTER operation:", error);
     }
   }
 
@@ -132,8 +162,8 @@ class User {
           if (!this.#validatePassword(newValue, 8)) {
             throw new Error("The password does not meet complexity requirements.");
           }
-          const saltPassword = 10;
-          const bcrypt_password = await bcrypt.hash(newValue, saltPassword);
+
+          const bcrypt_password = await bcrypt.hash(newValue, parseInt(envBcrypt.salt.salt1));
           table = "users";
           newData.password_hash = bcrypt_password;
           condition = { id };
@@ -147,8 +177,8 @@ class User {
           if (!this.#validatePassword(newValue, 10)) {
             throw new Error("The master password does not meet complexity requirements.");
           }
-          const saltMaster = 14;
-          const bcrypt_master = await bcrypt.hash(newValue, saltMaster);
+
+          const bcrypt_master = await bcrypt.hash(newValue, parseInt(envBcrypt.salt.salt2));
           table = "masterpassword";
           newData.master_password_hash = bcrypt_master;
           condition = { user_id };
@@ -158,10 +188,10 @@ class User {
           throw new Error("Invalid update type");
       }
 
-      const updatedUser = await this.#pool.update(table, newData, condition);
+      const updatedUser = await this.#databaseIstance.update(table, newData, condition);
       return updatedUser;
     } catch (error) {
-      this.#pool.errorAndLogger(`Error during UPDATEUSER operation for ${type}:`, error);
+      ErrorHandler.handle(`Error during UPDATEUSER operation for ${type}:`, error);
       throw new Error(`Failed to update user for ${type}`);
     }
   }
@@ -181,57 +211,35 @@ class User {
       }
 
       if (user && compareMaster) {
-        const removedUser = await this.#pool.remove("users", { id: id });
+        const removedUser = await this.#databaseIstance.remove("users", { id: id });
         return removedUser;
       }
     } catch (error) {
-      this.#pool.errorAndLogger("Error during REMOVEUSER operation:", error);
+      ErrorHandler.handle("Error during REMOVEUSER operation:", error);
       throw new Error("Failed to remove user");
     }
   }
 
   async #findByUsername(username) {
     try {
-      await this.#pool.beginTransaction();
+      await this.#transactionIstance.beginTransaction();
 
       const condition = {
         username: username,
       };
-      const findUser = await this.#pool.read("users", condition);
+      const findUser = await this.#databaseIstance.read("users", condition);
 
       if (findUser.length === 0) {
         throw new Error("User not found");
       }
 
-      await this.#pool.commit();
+      await this.#transactionIstance.commit();
 
       const user = findUser[0];
       return user;
     } catch (error) {
-      await this.#pool.rollback();
-      this.#pool.errorAndLogger("Error during FIND_BY_USERNAME operation:", error);
-    }
-  }
-
-  async #findByMaster(id) {
-    try {
-      await this.#pool.beginTransaction();
-
-      const condition = {
-        user_id: id,
-      };
-      const findCredentials = await this.#pool.read("masterpassword", condition);
-
-      if (findCredentials.length === 0) {
-        throw new Error("Credentials not found");
-      }
-      await this.#pool.commit();
-
-      const userCredentials = findCredentials[0];
-      return userCredentials;
-    } catch (error) {
-      await this.#pool.rollback();
-      this.#pool.errorAndLogger("Error during FIND_BY_MASTER operation:", error);
+      await this.#transactionIstance.rollback();
+      ErrorHandler.handle("Error during FIND_BY_USERNAME operation:", error);
     }
   }
 
@@ -240,6 +248,28 @@ class User {
 
     if (!matchPassword) {
       throw new Error(`Incorrect password`);
+    }
+  }
+
+  async #findByMaster(id) {
+    try {
+      await this.#transactionIstance.beginTransaction();
+
+      const condition = {
+        user_id: id,
+      };
+      const findCredentials = await this.#databaseIstance.read("masterpassword", condition);
+
+      if (findCredentials.length === 0) {
+        throw new Error("Credentials not found");
+      }
+      await this.#transactionIstance.commit();
+
+      const userCredentials = findCredentials[0];
+      return userCredentials;
+    } catch (error) {
+      await this.#transactionIstance.rollback();
+      ErrorHandler.handle("Error during FIND_BY_MASTER operation:", error);
     }
   }
 

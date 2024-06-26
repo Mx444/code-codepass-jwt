@@ -20,6 +20,7 @@
     "express-mysql-session": "^3.0.2",
     "express-session": "^1.18.0",
     "express-validator": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
     "mysql": "^2.18.1",
     "mysql2": "^3.10.0",
     "mysql2-promise": "^0.1.4",

@@ -2,12 +2,9 @@
 
 const express = require("express");
 const User = require("../models/users");
-const vault = require("../models/vault");
-const { body, validationResult } = require("express-validator");
 
 const router = express.Router();
 const user = new User();
-const password = new vault();
 
 router.post("/signup", async (req, res) => {
   const { username, email, password, master } = req.body;
