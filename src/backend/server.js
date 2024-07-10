@@ -1,12 +1,15 @@
 const express = require("express");
 const bodyParser = require("body-parser");
-const authRoutes = require("./routes/auth");
+const authRoutes = require("./routes/authRoutes");
 const path = require("path");
 const cookieSession = require("cookie-session");
 const session = require("./config/cookie");
+const cookieParser = require("cookie-parser");
 
 require("dotenv").config();
 const app = express();
+
+app.use(cookieParser());
 
 app.use(
   cookieSession({
@@ -14,7 +17,6 @@ app.use(
     keys: [session.cookie.key1, session.cookie.key2],
     maxAge: 24 * 60 * 60 * 1000,
     httpOnly: true,
-    // secure: true,
     sameSite: "lax",
   }),
 );
@@ -26,9 +28,7 @@ app.use(express.static(path.join(__dirname, "../frontend/")));
 
 app.use("/auth", authRoutes);
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3300;
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
-
-//bearer - token

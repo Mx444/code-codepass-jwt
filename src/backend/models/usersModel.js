@@ -2,7 +2,8 @@
 
 const Database = require("../db/database.js");
 const Transaction = require("../db/transactionManager.js");
-const TokenModel = require("./tokenModel.js");
+const RefreshToken = require("../token/refreshToken.js");
+const AccessToken = require("../token/accessToken.js");
 const bcrypt = require("bcrypt");
 const envBcrypt = require("../config/bcrypt.js");
 const validator = require("validator");
@@ -11,11 +12,13 @@ const ErrorHandler = require("../utils/errorHandler.js");
 class User {
   #databaseIstance;
   #transactionIstance;
-  #token;
+  #refreshtToken;
+  #accessToken;
   constructor() {
     this.#databaseIstance = new Database();
     this.#transactionIstance = new Transaction();
-    this.#token = new TokenModel(this.#databaseIstance, this.#transactionIstance);
+    this.#refreshtToken = new RefreshToken(this.#databaseIstance, this.#transactionIstance);
+    this.#accessToken = new AccessToken();
   }
 
   async signup(username, email, password, master) {
@@ -84,8 +87,6 @@ class User {
       };
       await this.#databaseIstance.create("masterpassword", userMaster);
       await this.#transactionIstance.commit();
-
-      return { userId: insertId, username: username, email: email };
     } catch (error) {
       await this.#transactionIstance.rollback();
       ErrorHandler.handle("Error during SIGNUP operation:", error);
@@ -94,47 +95,92 @@ class User {
 
   async loginUsernamePassword(username, password) {
     try {
+      this.#transactionIstance.beginTransaction();
       const user = await this.#findByUsername(username);
       await this.#matchPassword(password, user.password_hash);
-
-      const tokenFound = await this.#token.findActiveTokens(user);
-      if (!tokenFound) {
-        const newToken = await this.#token.generateAndStoreToken(user);
-        this.#transactionIstance.commit();
-        return newToken;
-      }
-
+      const temporanyAccessToken = await this.#accessToken.generateAccessToken(user.id);
       this.#transactionIstance.commit();
-      return { token: tokenFound };
+      return { userId: user.id, temporanyAccessToken };
     } catch (error) {
-      await this.#transactionIstance.rollback();
+      this.#transactionIstance.rollback();
       ErrorHandler.handle("Error during LOGIN USERNAME PASSWORD operation:", error);
     }
   }
 
-  //! DA SISTEMARE
-  async loginMaster(id, master) {
+  async loginMaster(temporanyAccessToken, master) {
     try {
-      const masterLogin = await this.#findByMaster(id);
-      await this.#matchPassword(master, masterLogin.master_password_hash);
-
       await this.#transactionIstance.beginTransaction();
-      const findUser = await this.#databaseIstance.read("users", { id: id });
-      const user = findUser[0];
-      await this.#transactionIstance.commit();
 
-      return { userId: masterLogin.user_id, username: user.username, email: user.email };
+      const verifyAccessToken = await this.#accessToken.verifyAccessToken(temporanyAccessToken);
+
+      if (!!verifyAccessToken) {
+        const masterTable = "masterpassword";
+        const masterCondition = { user_id: verifyAccessToken.userId };
+        const verifyMaster = await this.#databaseIstance.read(masterTable, masterCondition);
+        const { master_password_hash: currentMaster, user_id: currentId } = verifyMaster[0];
+        await this.#matchPassword(master, currentMaster);
+
+        const tokenTable = "tokens";
+        const tokenCondition = { user_id: currentId };
+        const verifyActiveRefresh = await this.#databaseIstance.read(tokenTable, tokenCondition);
+
+        if (verifyActiveRefresh.length > 0) {
+          const { token: refreshToken } = verifyActiveRefresh[0];
+          const newAccessToken = await this.#accessToken.generateAccessToken(currentId);
+          return { accessToken: newAccessToken, refreshToken };
+        }
+
+        const newAccessToken = await this.#accessToken.generateAccessToken(currentId);
+        const refreshToken = await this.#refreshtToken.generateAndStoreRefreshToken(currentId);
+
+        await this.#transactionIstance.commit();
+        return { accessToken: newAccessToken, refreshToken };
+      } else {
+        throw new Error("Invalid or expired temporary access token");
+      }
     } catch (error) {
       await this.#transactionIstance.rollback();
       ErrorHandler.handle("Error during LOGIN MASTER operation:", error);
     }
   }
 
-  async logout() {}
-
-  async updateUser(type, username, password, newValue) {
+  async logout(accessToken) {
     try {
-      const { id, username: currentUsername, password_hash } = await this.#findByUsername(username);
+      await this.#transactionIstance.beginTransaction();
+
+      const verifyAccessToken = await this.#accessToken.verifyAccessToken(accessToken);
+      if (!verifyAccessToken) {
+        throw new Error("Invalid Token!");
+      }
+
+      const tokenTable = "tokens";
+      const tokenCondition = { user_id: verifyAccessToken.userId };
+      const matchUserId = await this.#databaseIstance.read(tokenTable, tokenCondition);
+      if (!matchUserId) {
+        throw new Error("ID not Found!");
+      }
+
+      const { user_id: currentId } = matchUserId[0];
+      const removeCondition = { user_id: currentId };
+      await this.#databaseIstance.remove(tokenTable, removeCondition);
+
+      await this.#transactionIstance.commit();
+    } catch (error) {
+      await this.#transactionIstance.rollback();
+      ErrorHandler.handle("Error during LOGOUT operation:", error);
+    }
+  }
+
+  async updateUser(accessToken, type, newValue) {
+    try {
+      await this.#transactionIstance.beginTransaction();
+
+      const verifyAccessToken = await this.#accessToken.verifyAccessToken(accessToken);
+      if (!verifyAccessToken) {
+        throw new Error("Invalid Token!");
+      }
+
+      const { id, username: currentUsername, password_hash } = await this.#findUserById(verifyAccessToken.userId);
 
       const { user_id, master_password_hash } = await this.#findByMaster(id);
       await this.#matchPassword(password, password_hash);
@@ -189,21 +235,30 @@ class User {
       }
 
       const updatedUser = await this.#databaseIstance.update(table, newData, condition);
+      await this.#transactionIstance.commit();
       return updatedUser;
     } catch (error) {
+      await this.#transactionIstance.rollback();
       ErrorHandler.handle(`Error during UPDATEUSER operation for ${type}:`, error);
       throw new Error(`Failed to update user for ${type}`);
     }
   }
 
-  async removeUser(username, password, master) {
+  async removeUser(accessToken, password, master) {
     try {
-      const user = await this.#findByUsername(username);
-      const { id, password_hash } = user;
+      await this.#transactionIstance.beginTransaction();
+      const verifyAccessToken = await this.#accessToken.verifyAccessToken(accessToken);
+
+      if (!verifyAccessToken) {
+        throw new Error("Invalid Token !");
+      }
+
+      const user = await this.#findUserById(verifyAccessToken.userId);
+      const { id: currentId, password_hash } = user;
 
       await this.#matchPassword(password, password_hash);
 
-      const { master_password_hash } = await this.#findByMaster(id);
+      const { master_password_hash } = await this.#findByMaster(currentId);
       const compareMaster = await bcrypt.compare(master, master_password_hash);
 
       if (!compareMaster) {
@@ -211,36 +266,55 @@ class User {
       }
 
       if (user && compareMaster) {
-        const removedUser = await this.#databaseIstance.remove("users", { id: id });
-        return removedUser;
+        const userTable = "users";
+        const userCondition = { id: currentId };
+        await this.#databaseIstance.remove(userTable, userCondition);
+        await this.#transactionIstance.commit();
       }
     } catch (error) {
+      await this.#transactionIstance.rollback();
       ErrorHandler.handle("Error during REMOVEUSER operation:", error);
       throw new Error("Failed to remove user");
     }
   }
 
   async #findByUsername(username) {
-    try {
-      await this.#transactionIstance.beginTransaction();
+    const table = "users";
+    const condition = { username: username };
+    const findUser = await this.#databaseIstance.read(table, condition);
 
-      const condition = {
-        username: username,
-      };
-      const findUser = await this.#databaseIstance.read("users", condition);
-
-      if (findUser.length === 0) {
-        throw new Error("User not found");
-      }
-
-      await this.#transactionIstance.commit();
-
-      const user = findUser[0];
-      return user;
-    } catch (error) {
-      await this.#transactionIstance.rollback();
-      ErrorHandler.handle("Error during FIND_BY_USERNAME operation:", error);
+    if (findUser.length === 0) {
+      throw new Error("User not found");
     }
+
+    const user = findUser[0];
+    return user;
+  }
+
+  async #findUserById(id) {
+    const table = "users";
+    const condition = { id: id };
+    const findUser = await this.#databaseIstance.read(table, condition);
+
+    if (findUser.length === 0) {
+      throw new Error("User not found");
+    }
+
+    const user = findUser[0];
+    return user;
+  }
+
+  async #findByMaster(id) {
+    const table = "masterpassword";
+    const condition = { user_id: id };
+    const findCredentials = await this.#databaseIstance.read(table, condition);
+
+    if (findCredentials.length === 0) {
+      throw new Error("Credentials not found");
+    }
+
+    const userCredentials = findCredentials[0];
+    return userCredentials;
   }
 
   async #matchPassword(string, hash) {
@@ -248,28 +322,6 @@ class User {
 
     if (!matchPassword) {
       throw new Error(`Incorrect password`);
-    }
-  }
-
-  async #findByMaster(id) {
-    try {
-      await this.#transactionIstance.beginTransaction();
-
-      const condition = {
-        user_id: id,
-      };
-      const findCredentials = await this.#databaseIstance.read("masterpassword", condition);
-
-      if (findCredentials.length === 0) {
-        throw new Error("Credentials not found");
-      }
-      await this.#transactionIstance.commit();
-
-      const userCredentials = findCredentials[0];
-      return userCredentials;
-    } catch (error) {
-      await this.#transactionIstance.rollback();
-      ErrorHandler.handle("Error during FIND_BY_MASTER operation:", error);
     }
   }
 

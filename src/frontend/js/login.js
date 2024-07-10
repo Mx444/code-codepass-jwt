@@ -35,10 +35,11 @@ document.addEventListener("DOMContentLoaded", async function () {
     const password = passwordInput.value;
 
     try {
-      const response = await fetch("/auth/login", {
+      const response = await fetch("/auth/login/init", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, password }),
+        credentials: "include",
       });
 
       const result = await response.json();
@@ -65,13 +66,14 @@ document.addEventListener("DOMContentLoaded", async function () {
   async function loginMaster(event) {
     event.preventDefault();
 
-    const master = masterPasswordInput.value;
+    const masterPassword = masterPasswordInput.value;
 
     try {
-      const response = await fetch("/auth/login", {
+      const response = await fetch("/auth/login/complete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ master }),
+        body: JSON.stringify({ masterPassword }),
+        credentials: "include",
       });
 
       const result = await response.json();
